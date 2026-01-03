@@ -151,3 +151,6 @@ Thumbs.db
 # BPE vocabulary files
 *.bpe
 *.vocab
+
+# BiSAM2 model log files
+/output_jpg
