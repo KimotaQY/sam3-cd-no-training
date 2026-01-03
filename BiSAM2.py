@@ -40,6 +40,176 @@ def linear_color_interpolation(img1, img2, alpha):
     return interpolated_rgb
 
 
+def enhanced_color_interpolation(img1,
+                                 img2,
+                                 alpha,
+                                 method="histogram_matching"):
+    """
+    Enhanced color interpolation between two images using various methods to avoid ghosting artifacts
+
+    :param img1: T1 image (numpy array or PIL Image)
+    :param img2: T2 image (numpy array or PIL Image)
+    :param alpha: Interpolation weight (0 for full T1, 1 for full T2)
+    :param method: Method to use ('histogram_matching', 'color_transfer', 'opt_flow', 'none')
+    :return: Interpolated frame image
+    """
+    # Convert PIL Images to numpy arrays if necessary
+    if hasattr(img1, "convert"):  # PIL Image object
+        img1 = np.array(img1.convert("RGB"))
+    if hasattr(img2, "convert"):  # PIL Image object
+        img2 = np.array(img2.convert("RGB"))
+
+    # Ensure images are in the correct format (RGB/BGR)
+    if len(img1.shape) == 3:  # Has 3 channels
+        img1_rgb = img1
+    else:  # Grayscale
+        img1_rgb = np.stack([img1] * 3, axis=-1)
+
+    if len(img2.shape) == 3:  # Has 3 channels
+        img2_rgb = img2
+    else:  # Grayscale
+        img2_rgb = np.stack([img2] * 3, axis=-1)
+
+    # Resize images to the same size if they differ
+    if img1_rgb.shape != img2_rgb.shape:
+        h, w = img1_rgb.shape[:2]
+        img2_rgb = cv2.resize(img2_rgb, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    if method == "histogram_matching":
+        # Use histogram matching to align the color distribution
+        matched_img2 = match_histograms(img1_rgb, img2_rgb)
+        interpolated_rgb = matched_img2.astype(np.uint8)
+        # interpolated_rgb = (1 - alpha) * img1_rgb + alpha * matched_img2
+        # interpolated_rgb = interpolated_rgb.astype(np.uint8)
+        return interpolated_rgb
+    elif method == "color_transfer":
+        # Use Reinhard color transfer to match color statistics
+        transferred_img2 = color_transfer(img1_rgb, img2_rgb)
+        interpolated_rgb = transferred_img2.astype(np.uint8)
+
+        # interpolated_rgb = (1 - alpha) * img1_rgb + alpha * transferred_img2
+        # interpolated_rgb = interpolated_rgb.astype(np.uint8)
+        return interpolated_rgb
+    elif method == "opt_flow":
+        # Use optical flow to align images before interpolation
+        aligned_img2 = align_images_with_optical_flow(img1_rgb, img2_rgb)
+        interpolated_rgb = aligned_img2.astype(np.uint8)
+        # interpolated_rgb = (1 - alpha) * img1_rgb + alpha * aligned_img2
+        # interpolated_rgb = interpolated_rgb.astype(np.uint8)
+        return interpolated_rgb
+    else:
+        # Simple linear interpolation (original method)
+        interpolated_rgb = (1 - alpha) * img1_rgb + alpha * img2_rgb
+        interpolated_rgb = interpolated_rgb.astype(np.uint8)
+        return interpolated_rgb
+
+
+def match_histograms(img1, img2):
+    """
+    Match the histogram of img2 to img1 using OpenCV
+    """
+    # Convert to LAB color space for histogram matching
+    lab1 = cv2.cvtColor(img1, cv2.COLOR_RGB2LAB).astype(np.float32)
+    lab2 = cv2.cvtColor(img2, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+    # Match histograms for each channel separately
+    matched_lab = np.zeros_like(lab2)
+    for i in range(3):  # L, A, B channels
+        matched_lab[:, :, i] = cv2.createCLAHE(clipLimit=2.0,
+                                               tileGridSize=(8, 8)).apply(
+                                                   lab2[:, :,
+                                                        i].astype(np.uint8))
+        # Alternative: match histograms directly
+        # matched_lab[:, :, i] = cv2.equalizeHist(lab2[:, :, i].astype(np.uint8))
+
+    # Convert back to RGB
+    matched_img = cv2.cvtColor(matched_lab.astype(np.uint8), cv2.COLOR_LAB2RGB)
+    return matched_img
+
+
+def color_transfer(img1, img2):
+    """
+    Transfer color statistics from img1 to img2 using Reinhard color transfer
+    """
+    # Convert images to float for processing
+    img1 = img1.astype(np.float32)
+    img2 = img2.astype(np.float32)
+
+    # Convert to LAB color space
+    lab1 = cv2.cvtColor(img1.astype(np.uint8), cv2.COLOR_RGB2LAB)
+    lab2 = cv2.cvtColor(img2.astype(np.uint8), cv2.COLOR_RGB2LAB)
+
+    # Compute mean and std of each channel in LAB for img1
+    l1_mean, a1_mean, b1_mean = np.mean(lab1, axis=(0, 1))
+    l1_std, a1_std, b1_std = np.std(lab1, axis=(0, 1))
+
+    # Compute mean and std of each channel in LAB for img2
+    l2_mean, a2_mean, b2_mean = np.mean(lab2, axis=(0, 1))
+    l2_std, a2_std, b2_std = np.std(lab2, axis=(0, 1))
+
+    # Ensure the variables are arrays to allow indexing
+    if np.isscalar(l1_std):
+        l1_std = np.array([l1_std, a1_std, b1_std])
+        l2_std = np.array([l2_std, a2_std, b2_std])
+        l1_mean = np.array([l1_mean, a1_mean, b1_mean])
+        l2_mean = np.array([l2_mean, a2_mean, b2_mean])
+    else:
+        l1_std = np.array([l1_std[0], a1_std[0], b1_std[0]])
+        l2_std = np.array([l2_std[0], a2_std[0], b2_std[0]])
+        l1_mean = np.array([l1_mean[0], a1_mean[0], b1_mean[0]])
+        l2_mean = np.array([l2_mean[0], a2_mean[0], b2_mean[0]])
+
+    # Normalize img2's LAB channels
+    lab2_norm = np.zeros_like(lab2, dtype=np.float32)
+    lab2_norm[:, :, 0] = (lab2[:, :, 0] -
+                          l2_mean[0]) * (l1_std[0] / l2_std[0]) + l1_mean[0]
+    lab2_norm[:, :, 1] = (lab2[:, :, 1] -
+                          l2_mean[1]) * (l1_std[1] / l2_std[1]) + l1_mean[1]
+    lab2_norm[:, :, 2] = (lab2[:, :, 2] -
+                          l2_mean[2]) * (l1_std[2] / l2_std[2]) + l1_mean[2]
+
+    # Clip values to valid range
+    lab2_norm = np.clip(lab2_norm, 0, 255)
+
+    # Convert back to RGB
+    transferred_img = cv2.cvtColor(lab2_norm.astype(np.uint8),
+                                   cv2.COLOR_LAB2RGB)
+    return transferred_img
+
+
+def align_images_with_optical_flow(img1, img2):
+    """
+    Align img2 to img1 using optical flow
+    """
+    # Convert to grayscale for optical flow computation
+    gray1 = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY)
+    gray2 = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY)
+
+    # Calculate optical flow
+    flow = cv2.calcOpticalFlowFarneback(gray1, gray2, None, 0.5, 3, 15, 3, 5,
+                                        1.2, 0)
+
+    # Get image dimensions
+    h, w = gray1.shape
+
+    # Generate coordinate grids
+    flow_map = np.zeros((h, w, 2), dtype=np.float32)
+    flow_map[:, :, 0] = np.arange(w)
+    flow_map[:, :, 1] = np.arange(h)[:, np.newaxis]
+    flow_map = flow_map + flow
+
+    # Remap img2 to align with img1
+    aligned_img2 = cv2.remap(
+        img2,
+        flow_map[:, :, 0],
+        flow_map[:, :, 1],
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT,
+    )
+
+    return aligned_img2
+
+
 def gen_frame(folder_paths, output_dir="output_jpg", sort="asc", mid_frame=0):
     """
     Convert PNG format image files to JPEG format and optionally generate intermediate interpolated frames
@@ -123,12 +293,13 @@ def gen_frame(folder_paths, output_dir="output_jpg", sort="asc", mid_frame=0):
                 # Perform linear color interpolation to generate intermediate frames
                 first_frame = paths_to_process[0]
                 final_frame = paths_to_process[-1]
-                img = linear_color_interpolation(
+                img = enhanced_color_interpolation(
                     # cv2.imread(first_frame, cv2.IMREAD_UNCHANGED),
                     # cv2.imread(final_frame, cv2.IMREAD_UNCHANGED),
                     Image.open(first_frame),
                     Image.open(final_frame),
                     alpha=alpha,
+                    method="color_transfer",
                 )
                 # Save as JPEG
                 cv2.imwrite(output_path, img)
