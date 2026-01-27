@@ -395,7 +395,10 @@ def inference(
         p for p in os.listdir(before_img_dir) if os.path.splitext(p)[-1] in [".png"]
     ]
 
-    output_dir = f"./logs/{dataset_name}/generate_mid{mid_frame}_{diff_frame_num}_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic"
+    if mid_frame == 0:
+        output_dir = f"./logs/{dataset_name}/generate_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic"
+    else:
+        output_dir = f"./logs/{dataset_name}/generate_mid{mid_frame}_{diff_frame_num}_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic"
 
     # 存在的文件夹则读取已完成文件
     if os.path.isdir(output_dir):
@@ -514,76 +517,76 @@ def inference(
 
 
 if __name__ == "__main__":
-    img_name = "tile_9216_11264.png"
-    img_dirs = [
-        "/home/qy/CD_datasets/WHU-CD/test/A",
-        "/home/qy/CD_datasets/WHU-CD/test/B",
-        "/home/qy/CD_datasets/WHU-CD/test/label",
-    ]
-    # img_name = "test_118.png"
+    # img_name = "tile_9216_11264.png"
     # img_dirs = [
-    #     "/home/qy/CD_datasets/LEVIR-CD/test/A",
-    #     "/home/qy/CD_datasets/LEVIR-CD/test/B",
-    #     "/home/qy/CD_datasets/LEVIR-CD/test/label",
+    #     "/home/qy/CD_datasets/WHU-CD/test/A",
+    #     "/home/qy/CD_datasets/WHU-CD/test/B",
+    #     "/home/qy/CD_datasets/WHU-CD/test/label",
     # ]
-    img_paths = []
-    for img_dir in img_dirs:
-        img_paths.append(os.path.join(img_dir, img_name))
+    # # img_name = "test_118.png"
+    # # img_dirs = [
+    # #     "/home/qy/CD_datasets/LEVIR-CD/test/A",
+    # #     "/home/qy/CD_datasets/LEVIR-CD/test/B",
+    # #     "/home/qy/CD_datasets/LEVIR-CD/test/label",
+    # # ]
+    # img_paths = []
+    # for img_dir in img_dirs:
+    #     img_paths.append(os.path.join(img_dir, img_name))
 
-    mask = predict(
-        img_paths=img_paths[:2],
-        prompt_text_str=["building or roof or house"],
-        mid_frame=0,
-        diff_frame_num=-1,
-        max_objects_per_batch=500,
-        score_threshold_detection=0.3,
-        new_det_thresh=0.3,
-    )
-    # create a figure that can hold three subplots
-    plt.figure(figsize=(15, 10))  # set the figure size
-
-    # drawing img_A
-    # img_A = cv2.imread(img_paths[0])
-    img_A = Image.open(img_paths[0])
-    plt.subplot(2, 2, 1)
-    plt.imshow(img_A)
-    plt.title("T1")
-    plt.axis("off")
-
-    # drawing img_B
-    # img_B = cv2.imread(img_paths[1])
-    img_B = Image.open(img_paths[1])
-    plt.subplot(2, 2, 2)
-    plt.imshow(img_B)
-    plt.title("T2")
-    plt.axis("off")
-
-    # drawing mask
-    plt.subplot(2, 2, 3)
-    plt.imshow(mask, cmap="gray")
-    plt.title("mask")
-    plt.axis("off")
-
-    # drawing label
-    plt.subplot(2, 2, 4)
-    plt.imshow(Image.open(img_paths[2]), cmap="gray")
-    plt.title("label")
-    plt.axis("off")
-
-    # show the plot
-    plt.tight_layout()
-    plt.show()
-
-    ### 批量推理 ###
-    # inference(
-    #     dataset_name="WHU-CD",
+    # mask = predict(
+    #     img_paths=img_paths[:2],
     #     prompt_text_str=["building or roof or house"],
     #     mid_frame=0,
     #     diff_frame_num=-1,
     #     max_objects_per_batch=500,
-    #     score_threshold_detection=0.25,
-    #     new_det_thresh=0.25,
+    #     score_threshold_detection=0.3,
+    #     new_det_thresh=0.3,
     # )
+    # # create a figure that can hold three subplots
+    # plt.figure(figsize=(15, 10))  # set the figure size
+
+    # # drawing img_A
+    # # img_A = cv2.imread(img_paths[0])
+    # img_A = Image.open(img_paths[0])
+    # plt.subplot(2, 2, 1)
+    # plt.imshow(img_A)
+    # plt.title("T1")
+    # plt.axis("off")
+
+    # # drawing img_B
+    # # img_B = cv2.imread(img_paths[1])
+    # img_B = Image.open(img_paths[1])
+    # plt.subplot(2, 2, 2)
+    # plt.imshow(img_B)
+    # plt.title("T2")
+    # plt.axis("off")
+
+    # # drawing mask
+    # plt.subplot(2, 2, 3)
+    # plt.imshow(mask, cmap="gray")
+    # plt.title("mask")
+    # plt.axis("off")
+
+    # # drawing label
+    # plt.subplot(2, 2, 4)
+    # plt.imshow(Image.open(img_paths[2]), cmap="gray")
+    # plt.title("label")
+    # plt.axis("off")
+
+    # # show the plot
+    # plt.tight_layout()
+    # plt.show()
+
+    ### 批量推理 ###
+    inference(
+        dataset_name="WHU-CD",
+        prompt_text_str=["building or roof or house"],
+        mid_frame=0,
+        diff_frame_num=-1,
+        max_objects_per_batch=500,
+        score_threshold_detection=0.5,
+        new_det_thresh=0.5,
+    )
 
     # ### 测试插值方法 ###
     # from BiSAM2 import color_transfer, match_histograms, align_images_with_optical_flow
