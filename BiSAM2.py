@@ -236,6 +236,8 @@ def gen_frame(folder_paths, output_dir="output_jpg", sort="asc", mid_frame=0):
 
     # Process all input image files
     for idx, folder_path in enumerate(paths_to_process):
+        if idx > 0:
+            continue
         # Construct input and output paths
         input_path = folder_path
         output_filename = f"{idx + 1}.jpg" if idx == 0 else f"{idx + mid_frame + 1}.jpg"
@@ -299,8 +301,48 @@ def gen_frame(folder_paths, output_dir="output_jpg", sort="asc", mid_frame=0):
                     alpha=alpha,
                     method="color_transfer",
                 )
+
+                # import matplotlib.pyplot as plt
+
+                # # create a figure that can hold three subplots
+                # plt.figure(figsize=(15, 10))  # set the figure size
+
+                # # drawing img_A
+                # # img_A = cv2.imread(img_paths[0])
+                # img_A = Image.open(first_frame)
+                # plt.subplot(2, 2, 1)
+                # plt.imshow(img_A)
+                # plt.title("T1")
+                # plt.axis("off")
+
+                # # drawing img_B
+                # # img_B = cv2.imread(img_paths[1])
+                # img_B = Image.open(final_frame)
+                # plt.subplot(2, 2, 2)
+                # plt.imshow(img_B)
+                # plt.title("T2")
+                # plt.axis("off")
+
+                # # drawing mask
+                # plt.subplot(2, 2, 3)
+                # plt.imshow(img, cmap="gray")
+                # plt.title("mask")
+                # plt.axis("off")
+
+                # # drawing label
+                # plt.subplot(2, 2, 4)
+                # plt.imshow(img, cmap="gray")
+                # plt.title("label")
+                # plt.axis("off")
+
+                # # show the plot
+                # plt.tight_layout()
+                # plt.show()
+
                 # Save as JPEG
-                cv2.imwrite(output_path, img)
+                # Convert RGB to BGR for OpenCV
+                img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(output_path, img_bgr)
                 # img.save(output_path, "JPEG", quality=100)
                 print(
                     f"Intermediate frame generated: {alpha} -> {os.path.basename(output_path)}"
@@ -311,33 +353,43 @@ def gen_frame(folder_paths, output_dir="output_jpg", sort="asc", mid_frame=0):
     return output_dir
 
 
-def compute_mask_iou(mask1, mask2):
+def compute_mask_iou(mask1, mask2, device="cuda"):
     """
-    Calculate the Intersection over Union (IoU) between two masks
-
-    This function measures the similarity between two binary masks by computing
-    the ratio of their intersection area to their union area. The IoU value
-    ranges from 0 to 1, where 1 indicates identical masks and 0 indicates
-    no overlap.
-
-    Args:
-        mask1 (numpy.ndarray): First mask array where non-zero values
-                              represent foreground regions
-        mask2 (numpy.ndarray): Second mask array where non-zero values
-                              represent foreground regions
-
-    Returns:
-        float: IoU value between the two masks in range [0, 1]
-               Returns 1.0 when both masks are all zeros (considered identical)
+    PyTorch GPU版IOU计算，完全保留原逻辑：
+    1. mask>0做二进制判断
+    2. union全0时返回1.0
+    3. 支持NumPy/PyTorch任意维度入参
+    4. 自动GPU/CPU适配
     """
-    intersection = np.logical_and(mask1 > 0, mask2 > 0)
-    union = np.logical_or(mask1 > 0, mask2 > 0)
-    sum_union = np.sum(union)
-    if sum_union == 0:  # Both masks are all zeros, considered identical
-        return 1.0
-    iou = np.sum(intersection) / sum_union
-    # diff_mask = np.logical_xor(mask1 > 0, mask2 > 0).astype(np.uint8)
-    return iou
+    if device == "cpu":
+        intersection = np.logical_and(mask1 > 0, mask2 > 0)
+        union = np.logical_or(mask1 > 0, mask2 > 0)
+        sum_union = np.sum(union)
+        if sum_union == 0:  # Both masks are all zeros, considered identical
+            return 1.0
+        iou = np.sum(intersection) / sum_union
+        # diff_mask = np.logical_xor(mask1 > 0, mask2 > 0).astype(np.uint8)
+        return iou
+    else:
+        # 步骤1：将NumPy入参转换为PyTorch张量，并移到GPU（如果是张量则直接复用）
+        def to_torch(x):
+            if isinstance(x, np.ndarray):
+                return torch.from_numpy(x).to(device)
+            return x.to(device) if x.device != device else x
+
+        mask1 = to_torch(mask1)
+        mask2 = to_torch(mask2)
+
+        # 步骤2：完全复刻原逻辑，仅将np替换为torch
+        intersection = torch.logical_and(mask1 > 0, mask2 > 0)
+        union = torch.logical_or(mask1 > 0, mask2 > 0)
+        sum_union = torch.sum(union).item()  # 张量转标量（CPU可计算）
+
+        if sum_union == 0:  # 两个mask全0，返回1.0
+            return 1.0
+
+        iou = torch.sum(intersection).item() / sum_union
+        return iou
 
 
 def merge_masks_old(masks_dict, compare_masks_dict=None, iou_threshold=0.5):
@@ -386,7 +438,9 @@ def merge_masks_old(masks_dict, compare_masks_dict=None, iou_threshold=0.5):
     return merged_mask
 
 
-def merge_masks(masks_dict, compare_masks_dict=None, iou_threshold=0.5):
+def merge_masks(
+    masks_dict, compare_masks_dict=None, iou_threshold=0.5, img_size=(1024, 1024)
+):
     """
      Merge masks from current frame, skipping objects with high IoU in the comparison frame
 
@@ -409,22 +463,150 @@ def merge_masks(masks_dict, compare_masks_dict=None, iou_threshold=0.5):
 
         return result
 
+    # 获取masks_dict和compare_masks_dict中所有key，并保存在一个列表中，保留唯一值
+    keys = list(set(masks_dict.keys()) | set(compare_masks_dict.keys()))
+
     # Iterate through each object in the current frame
-    for obj_id, mask_data in masks_dict.items():
+    # for obj_id, mask_data in masks_dict.items():
+    for obj_id in keys:
+        mask_data = masks_dict.get(obj_id)
+        compare_mask_data = compare_masks_dict.get(obj_id)
+
+        if compare_mask_data is None:
+            # If there's no corresponding mask in comparison frame, include this mask
+            merged_mask[obj_id] = mask_data
+            continue
+        if mask_data is None:
+            # If there's no corresponding mask in current frame, include this mask
+            merged_mask[obj_id] = compare_mask_data
+            continue
+
+        mask = mask_data["mask"]
+        box = mask_data["box"] * img_size[0]
+
+        # Convert mask to binary image with non-zero elements as 1 and zero elements as 0
+        mask_binary = (mask > 0).astype(np.uint8)
+
+        compare_mask = compare_mask_data["mask"]
+        compare_box = compare_mask_data["box"] * img_size[0]
+        compare_binary = (compare_mask > 0).astype(np.uint8)
+
+        # Extract bounding boxes to determine the region of interest
+        # Box format is assumed to be [x, y, w, h] (xywh format)
+        # Crop both masks to the combined bounding box region for efficient IoU calculation
+        if box is not None and compare_box is not None:
+            # Extract coordinates from boxes (x, y, w, h format)
+            x1, y1, w1, h1 = map(int, box)
+            x2, y2, w2, h2 = map(int, compare_box)
+
+            # Crop masks using their respective boxes
+            cropped_mask1 = mask_binary[y1 : y1 + h1, x1 : x1 + w1]
+            cropped_mask2 = compare_binary[y2 : y2 + h2, x2 : x2 + w2]
+
+            # Pad masks to the same size, ensuring symmetric padding
+            # Determine the maximum width and height
+            max_h = max(cropped_mask1.shape[0], cropped_mask2.shape[0])
+            max_w = max(cropped_mask1.shape[1], cropped_mask2.shape[1])
+
+            # Pad cropped_mask1
+            pad_h1 = max_h - cropped_mask1.shape[0]
+            pad_w1 = max_w - cropped_mask1.shape[1]
+
+            pad_top1 = pad_h1 // 2
+            pad_bottom1 = pad_h1 - pad_top1
+            pad_left1 = pad_w1 // 2
+            pad_right1 = pad_w1 - pad_left1
+
+            padded_mask1 = np.pad(
+                cropped_mask1,
+                ((pad_top1, pad_bottom1), (pad_left1, pad_right1)),
+                mode="constant",
+                constant_values=0,
+            )
+
+            # Pad cropped_mask2
+            pad_h2 = max_h - cropped_mask2.shape[0]
+            pad_w2 = max_w - cropped_mask2.shape[1]
+
+            pad_top2 = pad_h2 // 2
+            pad_bottom2 = pad_h2 - pad_top2
+            pad_left2 = pad_w2 // 2
+            pad_right2 = pad_w2 - pad_left2
+
+            padded_mask2 = np.pad(
+                cropped_mask2,
+                ((pad_top2, pad_bottom2), (pad_left2, pad_right2)),
+                mode="constant",
+                constant_values=0,
+            )
+
+            if obj_id == 11:
+                print("nmd")
+
+            # Calculate IoU on the padded masks
+            iou = compute_mask_iou(padded_mask1, padded_mask2)
+        else:
+            # If box information is not available, calculate IoU on full masks
+            iou = compute_mask_iou(mask_binary, compare_binary)
+
+        # If IoU is less than or equal to threshold, keep the mask
+        if iou <= iou_threshold:
+            # Only merge objects with low IoU
+            # 是否应该相加？ TODO
+            # 合并两个mask和它们的边界框
+            # 合并mask：将两个mask叠加
+            merged_mask_array = np.maximum(mask, compare_mask)
+
+            # 合并边界框：取两个边界框的外接矩形
+            if box is not None and compare_box is not None:
+                # 将 xywh 格式转换为 xyxy 格式进行合并
+                x1, y1, w1, h1 = box
+                x2, y2, w2, h2 = compare_box
+                x_min = min(x1, x2)
+                y_min = min(y1, y2)
+                x_max = max(x1 + w1, x2 + w2)
+                y_max = max(y1 + h1, y2 + h2)
+
+                # 转换回 xywh 格式
+                merged_box = [x_min, y_min, x_max - x_min, y_max - y_min]
+            else:
+                # 如果其中一个没有边界框，则使用存在的那个或为None
+                merged_box = box if box is not None else compare_box
+
+            # 创建合并后的mask数据
+            merged_mask_data = {
+                "mask": merged_mask_array,
+                "box": merged_box,
+                # 保留其他可能的字段
+                **{k: v for k, v in mask_data.items() if k not in ["mask", "box"]},
+            }
+            merged_mask[obj_id] = merged_mask_data
+
+            # merged_mask[obj_id] = mask_data
+
+    return merged_mask
+
+
+def compare_masks(masks_dict, compare_masks_dict=None, iou_threshold=0.5):
+    merged_mask = {}
+
+    if compare_masks_dict is None:
+        return dict()
+
+    keys = list(set(masks_dict.keys()) | set(compare_masks_dict.keys()))
+
+    for obj_id in keys:
+        mask_data = masks_dict.get(obj_id)
+        compare_mask_data = compare_masks_dict.get(obj_id)
+
+        if compare_mask_data is None or mask_data is None:
+            continue
+
         mask = mask_data["mask"]
         box = mask_data["box"]
 
         # Convert mask to binary image with non-zero elements as 1 and zero elements as 0
         mask_binary = (mask > 0).astype(np.uint8)
-
-        # Check if there is an object with the same ID in the comparison frame
-        compare_mask_data = compare_masks_dict.get(obj_id)
-        # Also convert the mask in the comparison frame to binary image
-        # Handle case where compare_mask_data is None
-        if compare_mask_data is None:
-            # If there's no corresponding mask in comparison frame, include this mask
-            merged_mask[obj_id] = mask
-            continue
 
         compare_mask = compare_mask_data["mask"]
         compare_box = compare_mask_data["box"]
@@ -485,10 +667,9 @@ def merge_masks(masks_dict, compare_masks_dict=None, iou_threshold=0.5):
             # If box information is not available, calculate IoU on full masks
             iou = compute_mask_iou(mask_binary, compare_binary)
 
-        # If IoU is less than or equal to threshold, keep the mask
-        if iou <= iou_threshold:
+        if iou > iou_threshold:
             # Only merge objects with low IoU
-            merged_mask[obj_id] = mask
+            merged_mask[obj_id] = mask_data
 
     return merged_mask
 
@@ -937,7 +1118,7 @@ def step_one(
             )
             out = response["outputs"]
             # 先运行一次
-            propagate_in_video(predictor, session_id)
+            propagate_in_video(predictor, session_id, "both")
             # 添加不重复的提示框
             new_obj_idx = out["out_obj_ids"].size
             for prompt_result in all_prompt_results:
@@ -1009,7 +1190,7 @@ def step_one(
 
         obj_size = out["out_obj_ids"].size
 
-        before_masks, after_masks = {}, {}
+        before_masks, after_masks, first_masks = {}, {}, {}
 
         if obj_size > max_objects_per_batch:
             out_obj_ids = out["out_obj_ids"]
@@ -1156,7 +1337,7 @@ def step_one(
                 )
 
         else:
-            outputs_per_frame = propagate_in_video(predictor, session_id)
+            outputs_per_frame = propagate_in_video(predictor, session_id, "both")
             frame_len = len(outputs_per_frame)
 
             before_frame = outputs_per_frame[
@@ -1165,14 +1346,14 @@ def step_one(
             after_frame = outputs_per_frame[frame_len - 1]
 
             # 帧追踪结果可视化
-            # for frame_idx, output in outputs_per_frame.items():
-            #     visualize_formatted_frame_output(
-            #         frame_idx,
-            #         video_frames_for_vis,
-            #         outputs_list=[prepare_masks_for_visualization({frame_idx: output})],
-            #         titles=[f"SAM 3 Dense Tracking outputs: {sort}"],
-            #         figsize=(6, 4),
-            #     )
+            for frame_idx, output in outputs_per_frame.items():
+                visualize_formatted_frame_output(
+                    frame_idx,
+                    video_frames_for_vis,
+                    outputs_list=[prepare_masks_for_visualization({frame_idx: output})],
+                    titles=[f"SAM 3 Dense Tracking outputs: {sort}"],
+                    figsize=(10, 8),
+                )
 
             # 旧的对象mask变化检测
             # b_ids, b_masks = before_frame.get("out_obj_ids"), before_frame.get(
@@ -1189,6 +1370,13 @@ def step_one(
             #     after_masks[id] = mask
 
             # 新的对象mask变化检测
+            first_frame = outputs_per_frame[0]
+            f_ids, f_masks, f_probs, f_boxes = (
+                first_frame.get("out_obj_ids"),
+                first_frame.get("out_binary_masks"),
+                first_frame.get("out_probs"),
+                first_frame.get("out_boxes_xywh"),
+            )
             b_ids, b_masks, b_probs, b_boxes = (
                 before_frame.get("out_obj_ids"),
                 before_frame.get("out_binary_masks"),
@@ -1201,6 +1389,13 @@ def step_one(
                 after_frame.get("out_probs"),
                 after_frame.get("out_boxes_xywh"),
             )
+
+            for id, mask, prob, box in zip(f_ids, f_masks, f_probs, f_boxes):
+                first_masks[id] = dict(
+                    mask=mask,
+                    prob=prob,
+                    box=box,
+                )
 
             for id, mask, prob, box in zip(b_ids, b_masks, b_probs, b_boxes):
                 before_masks[id] = dict(
@@ -1217,13 +1412,35 @@ def step_one(
                 )
 
         # merge masks
-        if obj_size == 0:
-            diff_mask = {}
-        else:
-
-            # compare the first and last frames to get the difference
-            diff_mask = merge_masks(
+        # if obj_size == 0:
+        #     diff_mask = {}
+        # else:
+        # compare the first and last frames to get the difference
+        if mid_frame > 100:
+            diff_mask_1 = merge_masks(
+                first_masks,
                 before_masks,
+                iou_threshold=iou_threshold,
+            )
+
+            diff_mask_2 = merge_masks(
+                first_masks,
+                after_masks,
+                iou_threshold=iou_threshold,
+            )
+
+            _diff_mask = compare_masks(
+                diff_mask_1,
+                diff_mask_2,
+                iou_threshold=iou_threshold,
+            )
+
+            diff_mask = _diff_mask
+            # for id, item in _diff_mask.items():
+            #     diff_mask[id] = item.get("mask")
+        else:
+            diff_mask = merge_masks(
+                first_masks,
                 after_masks,
                 iou_threshold=iou_threshold,
             )
