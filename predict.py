@@ -173,6 +173,97 @@ def merge_overlapping_masks(masks_A, masks_B, iou_threshold=0.5):
     return merged_mask
 
 
+from multiprocessing import Pool, cpu_count
+
+
+def match_single_A_global(mask_A_data, B_masks, iou_threshold, device):
+    obj_id_A, mask_A = mask_A_data
+    mask_A_bin = (mask_A > 0).astype(np.uint8)
+    matched_pairs = []
+    for obj_id_B, mask_B_bin in B_masks:
+        iou = compute_mask_iou(mask_A_bin, mask_B_bin, device=device)
+        if iou > iou_threshold:
+            matched_pairs.append((mask_A_bin, mask_B_bin))
+    return matched_pairs
+
+
+def merge_overlapping_masks_multiprocess(masks_A, masks_B, iou_threshold=0.5):
+    ref_shape = (1, 1024, 1024)
+    merged_mask = np.zeros(ref_shape, dtype=np.uint8)
+
+    # 预处理B-mask：转换为二进制，整理为列表（子进程直接使用）
+    B_masks = [
+        (obj_id, (mask["mask"] > 0).astype(np.uint8))
+        for obj_id, mask in masks_B.items()
+    ]
+    if not B_masks:
+        return merged_mask
+
+    # 预处理A-mask：构造待处理数据
+    A_masks = [(obj_id, mask["mask"]) for obj_id, mask in masks_A.items()]
+    if not A_masks:
+        return merged_mask
+
+    # 多进程执行：用starmap传递多参数（解决多个参数传递问题）
+    cpu_cores = max(1, cpu_count() - 1)  # 预留1核给系统，避免卡顿
+    with Pool(processes=cpu_cores) as pool:
+        # 用starmap替代map，支持传递多参数（每个A-mask对应一组参数）
+        # 格式：(mask_A_data, B_masks, iou_threshold)，B_masks和阈值所有子进程共享
+        task_args = [(a_data, B_masks, iou_threshold, "cpu") for a_data in A_masks]
+        all_matched = pool.starmap(match_single_A_global, task_args)
+
+    # 展平匹配对并叠加mask，和原逻辑一致
+    for matched_pairs in all_matched:
+        for mask_a, mask_b in matched_pairs:
+            combined = np.logical_or(mask_a, mask_b)
+            merged_mask = np.logical_or(merged_mask[0], combined).astype(np.uint8)[
+                None, ...
+            ]
+
+    return merged_mask
+
+
+# 全局配置：自动检测GPU，设置设备
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"当前使用计算设备：{DEVICE}")
+
+
+def merge_overlapping_masks_gpu(masks_A, masks_B, iou_threshold=0.5):
+    ref_shape = (1, 1024, 1024)
+    merged_mask = np.zeros(ref_shape, dtype=np.uint8)
+
+    # 步骤1：预处理mask，转换为PyTorch GPU张量（一次性拷贝到GPU，避免多次传输）
+    def preprocess_masks(masks_dict):
+        mask_list = []
+        for mask in masks_dict.values():
+            # NumPy→Tensor，二进制转换，移到GPU
+            mask_np = (mask["mask"] > 0).astype(np.uint8)
+            mask_torch = torch.from_numpy(mask_np).to(DEVICE).squeeze()  # (1024,1024)
+            mask_list.append(mask_torch)
+        return mask_list
+
+    masks_A_gpu = preprocess_masks(masks_A)
+    masks_B_gpu = preprocess_masks(masks_B)
+
+    if not masks_A_gpu or not masks_B_gpu:
+        return merged_mask
+
+    # 步骤2：GPU上完成所有IOU计算和mask叠加（无Python循环，CUDA内核并行）
+    # 提前创建GPU版的merged_mask，全程在GPU运算，最后只拷贝一次回CPU
+    merged_mask_gpu = torch.zeros(ref_shape, dtype=torch.uint8).to(DEVICE).squeeze()
+    for mask_A in masks_A_gpu:
+        for mask_B in masks_B_gpu:
+            iou = compute_mask_iou(mask_A, mask_B, device=DEVICE)
+            if iou > iou_threshold:
+                # GPU上叠加mask，无数据传输
+                combined = torch.logical_or(mask_A, mask_B)
+                merged_mask_gpu = torch.logical_or(merged_mask_gpu, combined)
+
+    # 步骤3：GPU→CPU，转换为原NumPy格式（仅一次数据拷贝）
+    merged_mask = merged_mask_gpu.cpu().numpy().astype(np.uint8)[None, ...]
+    return merged_mask
+
+
 def predict(
     img_paths: list,
     prompt_text_str: str | list,
@@ -242,7 +333,14 @@ def predict(
 
     print("计时开始: ", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 
-    diff_mask = merge_overlapping_masks(*diff_mask_list, iou_threshold=iou_threshold)
+    if DEVICE == torch.device("cuda"):
+        diff_mask = merge_overlapping_masks_gpu(
+            *diff_mask_list, iou_threshold=iou_threshold
+        )
+    else:
+        diff_mask = merge_overlapping_masks_multiprocess(
+            *diff_mask_list, iou_threshold=iou_threshold
+        )
 
     print("计时结束: ", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 
@@ -271,6 +369,9 @@ def inference(
     mid_frame=0,
     diff_frame_num=-1,
     iou_threshold=0.5,
+    max_objects_per_batch=50,
+    score_threshold_detection: float = 0.5,
+    new_det_thresh: float = 0.7,
 ):
     if dataset_name is None:
         print("请输入数据集名称")
@@ -294,7 +395,7 @@ def inference(
         p for p in os.listdir(before_img_dir) if os.path.splitext(p)[-1] in [".png"]
     ]
 
-    output_dir = f"./logs/{dataset_name}/generate_mid{mid_frame}_{diff_frame_num}_iou{iou_threshold}_[{prompt_text_str}]/automatic"
+    output_dir = f"./logs/{dataset_name}/generate_mid{mid_frame}_{diff_frame_num}_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic"
 
     # 存在的文件夹则读取已完成文件
     if os.path.isdir(output_dir):
@@ -315,6 +416,8 @@ def inference(
         predictor = build_sam3_video_predictor(
             gpus_to_use=gpus_to_use,
             checkpoint_path="/home/qy/weights/sam3-model/sam3.pt",
+            score_threshold_detection=score_threshold_detection,
+            new_det_thresh=new_det_thresh,
         )
 
         for idx, img_name in enumerate(img_names):
@@ -337,12 +440,17 @@ def inference(
                 diff_frame_num=diff_frame_num,
                 iou_threshold=iou_threshold,
                 prompt_text_str=prompt_text_str,
-                max_objects_per_batch=500,
+                max_objects_per_batch=max_objects_per_batch,
             )
 
-            diff_mask = merge_overlapping_masks(
-                *diff_mask_list, iou_threshold=iou_threshold
-            )
+            if DEVICE == torch.device("cuda"):
+                diff_mask = merge_overlapping_masks_gpu(
+                    *diff_mask_list, iou_threshold=iou_threshold
+                )
+            else:
+                diff_mask = merge_overlapping_masks_multiprocess(
+                    *diff_mask_list, iou_threshold=iou_threshold
+                )
 
             # 读取标签图（单通道）
             label_path = os.path.join(label_img_dir, img_name)
@@ -406,18 +514,18 @@ def inference(
 
 
 if __name__ == "__main__":
-    # img_name = "tile_9216_11264.png"
-    # img_dirs = [
-    #     "/home/qy/CD_datasets/WHU-CD/test/A",
-    #     "/home/qy/CD_datasets/WHU-CD/test/B",
-    #     "/home/qy/CD_datasets/WHU-CD/test/label",
-    # ]
-    img_name = "test_118.png"
+    img_name = "tile_9216_11264.png"
     img_dirs = [
-        "/home/qy/CD_datasets/LEVIR-CD/test/A",
-        "/home/qy/CD_datasets/LEVIR-CD/test/B",
-        "/home/qy/CD_datasets/LEVIR-CD/test/label",
+        "/home/qy/CD_datasets/WHU-CD/test/A",
+        "/home/qy/CD_datasets/WHU-CD/test/B",
+        "/home/qy/CD_datasets/WHU-CD/test/label",
     ]
+    # img_name = "test_118.png"
+    # img_dirs = [
+    #     "/home/qy/CD_datasets/LEVIR-CD/test/A",
+    #     "/home/qy/CD_datasets/LEVIR-CD/test/B",
+    #     "/home/qy/CD_datasets/LEVIR-CD/test/label",
+    # ]
     img_paths = []
     for img_dir in img_dirs:
         img_paths.append(os.path.join(img_dir, img_name))
@@ -428,8 +536,8 @@ if __name__ == "__main__":
         mid_frame=0,
         diff_frame_num=-1,
         max_objects_per_batch=500,
-        score_threshold_detection=0.25,
-        new_det_thresh=0.25,
+        score_threshold_detection=0.3,
+        new_det_thresh=0.3,
     )
     # create a figure that can hold three subplots
     plt.figure(figsize=(15, 10))  # set the figure size
@@ -472,6 +580,9 @@ if __name__ == "__main__":
     #     prompt_text_str=["building or roof or house"],
     #     mid_frame=0,
     #     diff_frame_num=-1,
+    #     max_objects_per_batch=500,
+    #     score_threshold_detection=0.25,
+    #     new_det_thresh=0.25,
     # )
 
     # ### 测试插值方法 ###
