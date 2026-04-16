@@ -1,5 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
+# pyre-unsafe
+
 import contextlib
 import os
 import queue
@@ -11,9 +13,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
-
 from PIL import Image
-
 from sam3.logger import get_logger
 from tqdm import tqdm
 
@@ -132,6 +132,13 @@ def load_video_frames(
         match = re.match(r"<load-dummy-video-(\d+)>", video_path)
         num_frames = int(match.group(1)) if match else 60
         return load_dummy_video(image_size, offload_video_to_cpu, num_frames=num_frames)
+    elif video_path.startswith("<load-zero-video"):
+        # Check for pattern <load-zero-video-N> where N is an integer
+        match = re.match(r"<load-zero-video-(\d+)>", video_path)
+        num_frames = int(match.group(1)) if match else 60
+        return load_dummy_video(
+            image_size, offload_video_to_cpu, num_frames=num_frames, do_zeros=True
+        )
     elif os.path.isdir(video_path):
         return load_video_frames_from_image_folder(
             image_folder=video_path,
@@ -152,7 +159,23 @@ def load_video_frames(
             video_loader_type=video_loader_type,
         )
     else:
-        raise NotImplementedError("Only video files and image folders are supported")
+        # No recognized extension (e.g., extensionless OIL paths) — attempt video loading.
+        # Only raise if the loader itself fails to decode frames.
+        try:
+            return load_video_frames_from_video_file(
+                video_path=video_path,
+                image_size=image_size,
+                offload_video_to_cpu=offload_video_to_cpu,
+                img_mean=img_mean,
+                img_std=img_std,
+                async_loading_frames=async_loading_frames,
+                video_loader_type=video_loader_type,
+            )
+        except Exception as e:
+            raise NotImplementedError(
+                f"Only video files and image folders are supported; "
+                f"failed to load '{video_path}' as video: {e}"
+            ) from e
 
 
 def load_video_frames_from_image_folder(
@@ -300,6 +323,12 @@ def load_video_frames_from_video_file_using_cv2(
     cap.release()
     pbar.close()
 
+    if len(frames) == 0:
+        raise RuntimeError(
+            f"No frames could be decoded from video: {video_path}. "
+            f"The file may be corrupted, empty, or encoded with an unsupported codec."
+        )
+
     # Convert to tensor
     frames_np = np.stack(frames, axis=0).astype(np.float32)  # (T, H, W, C)
     video_tensor = torch.from_numpy(frames_np).permute(0, 3, 1, 2)  # (T, C, H, W)
@@ -316,12 +345,15 @@ def load_video_frames_from_video_file_using_cv2(
     return video_tensor, original_height, original_width
 
 
-def load_dummy_video(image_size, offload_video_to_cpu, num_frames=60):
+def load_dummy_video(image_size, offload_video_to_cpu, num_frames=60, do_zeros=False):
     """
     Load a dummy video with random frames for testing and compilation warmup purposes.
     """
     video_height, video_width = 480, 640  # dummy original video sizes
-    images = torch.randn(num_frames, 3, image_size, image_size, dtype=torch.float16)
+    if not do_zeros:
+        images = torch.randn(num_frames, 3, image_size, image_size, dtype=torch.float16)
+    else:
+        images = torch.zeros(num_frames, 3, image_size, image_size, dtype=torch.float16)
     if not offload_video_to_cpu:
         images = images.cuda()
     return images, video_height, video_width
