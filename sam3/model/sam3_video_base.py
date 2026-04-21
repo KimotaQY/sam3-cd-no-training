@@ -302,6 +302,7 @@ class Sam3VideoBase(nn.Module):
         # bbox heuristic parameters
         reconstruction_bbox_iou_thresh=0.0,
         reconstruction_bbox_det_score=0.0,
+        use_decoupled_selection=False,
     ):
         super().__init__()
         self.detector = detector
@@ -355,6 +356,7 @@ class Sam3VideoBase(nn.Module):
         )
         self.reconstruction_bbox_iou_thresh = reconstruction_bbox_iou_thresh
         self.reconstruction_bbox_det_score = reconstruction_bbox_det_score
+        self.use_decoupled_selection = use_decoupled_selection
 
     @property
     def device(self):
@@ -1742,51 +1744,99 @@ class Sam3VideoBase(nn.Module):
         orig_vid_width: int,
         feature_cache: Dict,
     ):
-        """Add a new object to SAM2 inference states."""
-        prev_tracker_state = (
-            tracker_states_local[0] if len(tracker_states_local) > 0 else None
-        )
+        if self.use_decoupled_selection:
+            #############################
+            # Decoupled Selection
+            #############################
+            assert len(new_obj_ids) == new_obj_masks.size(0)
+            assert new_obj_masks.is_floating_point()
 
-        # prepare inference_state
-        # batch objects that first appear on the same frame together
-        # Clear inference state. Keep the cached image features if available.
-        new_tracker_state = self.tracker.init_state(
-            cached_features=feature_cache,
-            video_height=orig_vid_height,
-            video_width=orig_vid_width,
-            num_frames=num_frames,
-        )
-        new_tracker_state["backbone_out"] = (
-            prev_tracker_state.get("backbone_out", None)
-            if prev_tracker_state is not None
-            else None
-        )
+            input_mask_res = self.tracker.input_mask_size
+            new_obj_masks = F.interpolate(
+                new_obj_masks.unsqueeze(1),
+                size=(input_mask_res, input_mask_res),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(1)
+            new_obj_masks = new_obj_masks > 0
 
-        assert len(new_obj_ids) == new_obj_masks.size(0)
-        assert new_obj_masks.is_floating_point()
-        input_mask_res = self.tracker.input_mask_size
-        new_obj_masks = F.interpolate(
-            new_obj_masks.unsqueeze(1),
-            size=(input_mask_res, input_mask_res),
-            mode="bilinear",
-            align_corners=False,
-        ).squeeze(1)
-        new_obj_masks = new_obj_masks > 0
+            for new_obj_id, new_mask in zip(new_obj_ids, new_obj_masks):
+                new_tracker_state = self.tracker.init_state(
+                    cached_features=feature_cache,
+                    video_height=orig_vid_height,
+                    video_width=orig_vid_width,
+                    num_frames=num_frames,
+                )
 
-        # add object one by one
-        for new_obj_id, new_mask in zip(new_obj_ids, new_obj_masks):
-            self.tracker.add_new_mask(
-                inference_state=new_tracker_state,
-                frame_idx=frame_idx,
-                obj_id=new_obj_id,
-                mask=new_mask,
-                add_mask_to_memory=True,
+                if len(tracker_states_local) > 0:
+                    new_tracker_state["backbone_out"] = tracker_states_local[0].get(
+                        "backbone_out", None
+                    )
+
+                self.tracker.add_new_mask(
+                    inference_state=new_tracker_state,
+                    frame_idx=frame_idx,
+                    obj_id=new_obj_id,
+                    mask=new_mask,
+                    add_mask_to_memory=True,
+                )
+
+                self.tracker.propagate_in_video_preflight(
+                    new_tracker_state, run_mem_encoder=True
+                )
+
+                tracker_states_local.append(new_tracker_state)
+
+        else:
+            #############################
+            # Coupled Selection (SAM3 default)
+            #############################
+            """Add a new object to SAM2 inference states."""
+            prev_tracker_state = (
+                tracker_states_local[0] if len(tracker_states_local) > 0 else None
             )
-        # NOTE: we skip enforcing the non-overlapping constraint **globally** when adding new objects.
-        self.tracker.propagate_in_video_preflight(
-            new_tracker_state, run_mem_encoder=True
-        )
-        tracker_states_local.append(new_tracker_state)
+
+            # prepare inference_state
+            # batch objects that first appear on the same frame together
+            # Clear inference state. Keep the cached image features if available.
+            new_tracker_state = self.tracker.init_state(
+                cached_features=feature_cache,
+                video_height=orig_vid_height,
+                video_width=orig_vid_width,
+                num_frames=num_frames,
+            )
+            new_tracker_state["backbone_out"] = (
+                prev_tracker_state.get("backbone_out", None)
+                if prev_tracker_state is not None
+                else None
+            )
+
+            assert len(new_obj_ids) == new_obj_masks.size(0)
+            assert new_obj_masks.is_floating_point()
+            input_mask_res = self.tracker.input_mask_size
+            new_obj_masks = F.interpolate(
+                new_obj_masks.unsqueeze(1),
+                size=(input_mask_res, input_mask_res),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(1)
+            new_obj_masks = new_obj_masks > 0
+
+            # add object one by one
+            for new_obj_id, new_mask in zip(new_obj_ids, new_obj_masks):
+                self.tracker.add_new_mask(
+                    inference_state=new_tracker_state,
+                    frame_idx=frame_idx,
+                    obj_id=new_obj_id,
+                    mask=new_mask,
+                    add_mask_to_memory=True,
+                )
+            # NOTE: we skip enforcing the non-overlapping constraint **globally** when adding new objects.
+            self.tracker.propagate_in_video_preflight(
+                new_tracker_state, run_mem_encoder=True
+            )
+            tracker_states_local.append(new_tracker_state)
+
         return tracker_states_local
 
     def _tracker_remove_object(self, tracker_states_local: List[Any], obj_id: int):

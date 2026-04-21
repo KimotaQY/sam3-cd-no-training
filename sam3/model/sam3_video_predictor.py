@@ -33,6 +33,9 @@ class Sam3VideoPredictor(Sam3BasePredictor):
         async_loading_frames=False,
         video_loader_type="cv2",
         apply_temporal_disambiguation: bool = True,
+        score_threshold_detection: float = 0.5,
+        new_det_thresh: float = 0.7,
+        use_decoupled_selection: bool = True,
         compile: bool = False,
     ):
         super().__init__()
@@ -48,6 +51,9 @@ class Sam3VideoPredictor(Sam3BasePredictor):
                 geo_encoder_use_img_cross_attn=geo_encoder_use_img_cross_attn,
                 strict_state_dict_loading=strict_state_dict_loading,
                 apply_temporal_disambiguation=apply_temporal_disambiguation,
+                score_threshold_detection=score_threshold_detection,
+                new_det_thresh=new_det_thresh,
+                use_decoupled_selection=use_decoupled_selection,
                 compile=compile,
             )
             .cuda()
