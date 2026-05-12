@@ -154,3 +154,4 @@ Thumbs.db
 
 # BiSAM2 model log files
 /output_jpg
+/_tmp_jpg
