@@ -110,8 +110,8 @@ def merge_masks(img1, img2, full_w):
     h = img1.shape[0]
 
     new = np.zeros((h, full_w), np.float32)
-    new[:, :full_w // 2 + 1] = img1[:, :full_w // 2 + 1]
-    new[:, full_w // 2 + 1:] = img2[:, -(full_w // 2 - 1):]
+    new[:, : full_w // 2 + 1] = img1[:, : full_w // 2 + 1]
+    new[:, full_w // 2 + 1 :] = img2[:, -(full_w // 2 - 1) :]
 
     return new
 
@@ -253,20 +253,15 @@ def binary_accuracy_sklearn(pred, label):
     precision = precision_score(label_binary, pred_binary, zero_division=0)
     recall = recall_score(label_binary, pred_binary, zero_division=0)
     f1 = f1_score(label_binary, pred_binary, zero_division=0)
-    iou = jaccard_score(label_binary, pred_binary,
-                        zero_division=0)  # IoU也称为Jaccard指数
+    iou = jaccard_score(
+        label_binary, pred_binary, zero_division=0
+    )  # IoU也称为Jaccard指数
 
     return accuracy, precision, recall, f1, iou
 
 
 import torch
-from torchmetrics import (
-    Accuracy,
-    Precision,
-    Recall,
-    F1Score,
-    JaccardIndex  # IoU
-)
+from torchmetrics import Accuracy, Precision, Recall, F1Score, JaccardIndex  # IoU
 
 
 def binary_accuracy_torchmetrics(pred, label):
@@ -297,8 +292,7 @@ def binary_accuracy_torchmetrics(pred, label):
     f1_score = f1(pred_binary, label_binary)
     iou_score = iou(pred_binary, label_binary)
 
-    return acc.item(), prec.item(), rec.item(), f1_score.item(
-    ), iou_score.item()
+    return acc.item(), prec.item(), rec.item(), f1_score.item(), iou_score.item()
 
 
 def intersectionAndUnion(imPred, imLab, numClass):
@@ -313,15 +307,13 @@ def intersectionAndUnion(imPred, imLab, numClass):
 
     # Compute area intersection:
     intersection = imPred * (imPred == imLab)
-    (area_intersection, _) = np.histogram(intersection,
-                                          bins=numClass,
-                                          range=(1, numClass + 1))
+    (area_intersection, _) = np.histogram(
+        intersection, bins=numClass, range=(1, numClass + 1)
+    )
     # print(area_intersection)
 
     # Compute area union:
-    (area_pred, _) = np.histogram(imPred,
-                                  bins=numClass,
-                                  range=(1, numClass + 1))
+    (area_pred, _) = np.histogram(imPred, bins=numClass, range=(1, numClass + 1))
     (area_lab, _) = np.histogram(imLab, bins=numClass, range=(1, numClass + 1))
     area_union = area_pred + area_lab - area_intersection
     # print(area_pred)
@@ -346,9 +338,7 @@ def CaclTP(imPred, imLab, numClass):
     # print(TP_hist)
 
     # Compute area union:
-    (pred_hist, _) = np.histogram(imPred,
-                                  bins=numClass,
-                                  range=(1, numClass + 1))
+    (pred_hist, _) = np.histogram(imPred, bins=numClass, range=(1, numClass + 1))
     (lab_hist, _) = np.histogram(imLab, bins=numClass, range=(1, numClass + 1))
 
     union_hist = pred_hist + lab_hist - TP_hist
