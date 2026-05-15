@@ -14,7 +14,7 @@ from sam3.visualization_utils import (
     plot_results,
 )
 
-from .utils import gen_frame
+from .utils import gen_frame_v2
 
 
 def abs_to_rel_coords(coords, IMG_WIDTH, IMG_HEIGHT, coord_type="point"):
@@ -458,17 +458,11 @@ def sum_masks_dict(masks_A, masks_B=None, iou_threshold=0.5):
 
 class BiSAM2:
     def __init__(
-        self,
-        predictor=None,
-        mid_frame=0,
-        diff_frame_num=1,
-        iou_threshold=0.5,
-        max_objects_per_batch=50,
+        self, predictor=None, iou_threshold=0.5, mixed_methods: str | None = None
     ):
         self.predictor = predictor
         self.iou_threshold = iou_threshold
-        self.mid_frame = mid_frame
-        self.diff_frame_num = diff_frame_num
+        self.mixed_methods = mixed_methods
 
     def renew_session(self, video_path):
         response = self.predictor.handle_request(
@@ -764,10 +758,10 @@ class BiSAM2:
         ##### module 1 #####
         for sort in ["asc", "desc"]:
             ##### module 2 #####
-            video_path = gen_frame(
+            video_path = gen_frame_v2(
                 img_paths,
                 sort=sort,
-                mid_frame=self.mid_frame,
+                mixed_methods=self.mixed_methods,
             )
 
             # load "video_frames_for_vis" for visualization purposes (they are not used by the model)
@@ -935,9 +929,7 @@ class BiSAM2:
             outputs_per_frame = self.propagate_in_video(session_id, "both")
             frame_len = len(outputs_per_frame)
 
-            before_frame = outputs_per_frame[
-                0 if self.diff_frame_num == 1 else frame_len - 2
-            ]
+            before_frame = outputs_per_frame[0]
             after_frame = outputs_per_frame[frame_len - 1]
 
             # 帧追踪结果可视化
@@ -1149,14 +1141,10 @@ class Baseline_Bi:
     def __init__(
         self,
         predictor=None,
-        mid_frame=0,
-        diff_frame_num=1,
         iou_threshold=0.5,
     ):
         self.predictor = predictor
         self.iou_threshold = iou_threshold
-        self.mid_frame = mid_frame
-        self.diff_frame_num = diff_frame_num
 
     def renew_session(self, video_path):
         response = self.predictor.handle_request(
@@ -1255,9 +1243,7 @@ class Baseline_Bi:
             outputs_per_frame = self.propagate_in_video(session_id, "both")
             frame_len = len(outputs_per_frame)
 
-            before_frame = outputs_per_frame[
-                0 if self.diff_frame_num == 1 else frame_len - 2
-            ]
+            before_frame = outputs_per_frame[0]
             after_frame = outputs_per_frame[frame_len - 1]
 
             before_masks = before_frame.get("out_binary_masks")
@@ -1297,12 +1283,12 @@ class Baseline_Bi:
 
             diff_mask_list.append(diff)
 
-        _ = self.predictor.handle_request(
-            request=dict(
-                type="close_session",
-                session_id=session_id,
+            _ = self.predictor.handle_request(
+                request=dict(
+                    type="close_session",
+                    session_id=session_id,
+                )
             )
-        )
 
         if len(diff_mask_list) >= 2:
             mask1 = diff_mask_list[0]
@@ -1374,16 +1360,11 @@ def merge_masks_v1(masks_dict, compare_masks_dict=None, iou_threshold=0.5):
 
 class Baseline_Bi_SSCCE:
     def __init__(
-        self,
-        predictor=None,
-        mid_frame=0,
-        diff_frame_num=1,
-        iou_threshold=0.5,
+        self, predictor=None, iou_threshold=0.5, mixed_methods: str | None = None
     ):
         self.predictor = predictor
         self.iou_threshold = iou_threshold
-        self.mid_frame = mid_frame
-        self.diff_frame_num = diff_frame_num
+        self.mixed_methods = mixed_methods
 
     def renew_session(self, video_path):
         response = self.predictor.handle_request(
@@ -1422,17 +1403,28 @@ class Baseline_Bi_SSCCE:
     def step_one(
         self,
         img_paths: list,
-        prompt_text_str=None,
+        prompt_text: list[str] | str = [],
         merge_mask_func_version="v1",
     ):
+        if isinstance(prompt_text, list) and len(prompt_text) == 0:
+            print("请输入prompt")
+            return
+
+        if isinstance(prompt_text, str):
+            prompt_text = [prompt_text]
+        else:
+            prompt_text = prompt_text
+
+        ori_img_width, ori_img_height = Image.open(img_paths[0]).size
+
         diff_mask_list = []
         ##### module 1 #####
         for sort in ["asc", "desc"]:
             ##### module 2 #####
-            video_path = gen_frame(
+            video_path = gen_frame_v2(
                 img_paths,
                 sort=sort,
-                mid_frame=self.mid_frame,
+                mixed_methods=self.mixed_methods,
             )
 
             if isinstance(video_path, str) and video_path.endswith(".mp4"):
@@ -1459,123 +1451,136 @@ class Baseline_Bi_SSCCE:
                     )
                     video_frames_for_vis.sort()
 
-            session_id = self.renew_session(video_path)
+            diff_classes_masks = []
+            for prompt_text_str in prompt_text:
+                session_id = self.renew_session(video_path)
 
-            if prompt_text_str is None:
-                print("请输入prompt")
-                return
-            if isinstance(prompt_text_str, str):
-                prompt_text_str = [prompt_text_str]
-            else:
-                prompt_text_str = prompt_text_str
-
-            frame_idx = 0  # add a text prompt on frame 0
-            response = self.predictor.handle_request(
-                request=dict(
-                    type="add_prompt",
-                    session_id=session_id,
-                    frame_index=frame_idx,
-                    text=prompt_text_str[0],
+                frame_idx = 0  # add a text prompt on frame 0
+                response = self.predictor.handle_request(
+                    request=dict(
+                        type="add_prompt",
+                        session_id=session_id,
+                        frame_index=frame_idx,
+                        text=prompt_text_str,
+                    )
                 )
+                # out = response["outputs"]
+
+                ##### module n #####
+                before_masks, after_masks = {}, {}
+
+                outputs_per_frame = self.propagate_in_video(session_id, "both")
+                frame_len = len(outputs_per_frame)
+
+                before_frame = outputs_per_frame[0]
+                after_frame = outputs_per_frame[frame_len - 1]
+
+                b_ids, b_masks, b_probs, b_boxes = (
+                    before_frame.get("out_obj_ids"),
+                    before_frame.get("out_binary_masks"),
+                    before_frame.get("out_probs"),
+                    before_frame.get("out_boxes_xywh"),
+                )
+                a_ids, a_masks, a_probs, a_boxes = (
+                    after_frame.get("out_obj_ids"),
+                    after_frame.get("out_binary_masks"),
+                    after_frame.get("out_probs"),
+                    after_frame.get("out_boxes_xywh"),
+                )
+
+                for id, mask, prob, box in zip(b_ids, b_masks, b_probs, b_boxes):
+                    before_masks[id] = dict(
+                        mask=mask,
+                        prob=prob,
+                        box=box,
+                    )
+
+                for id, mask, prob, box in zip(a_ids, a_masks, a_probs, a_boxes):
+                    after_masks[id] = dict(
+                        mask=mask,
+                        prob=prob,
+                        box=box,
+                    )
+
+                # 帧追踪结果可视化
+                # for frame_idx, output in outputs_per_frame.items():
+                #     visualize_formatted_frame_output(
+                #         frame_idx,
+                #         video_frames_for_vis,
+                #         outputs_list=[
+                #             prepare_masks_for_visualization({frame_idx: output})
+                #         ],
+                #         titles=[f"SAM 3 Dense Tracking outputs: {sort}"],
+                #         figsize=(10, 8),
+                #     )
+
+                if merge_mask_func_version == "v1":
+                    diff_dict = merge_masks_v1(
+                        before_masks,
+                        after_masks,
+                        iou_threshold=self.iou_threshold,
+                    )
+                else:
+                    diff_dict = merge_masks(
+                        before_masks,
+                        after_masks,
+                        iou_threshold=self.iou_threshold,
+                    )
+
+                if diff_dict:
+                    # 获取第一个mask的形状作为参考
+                    first_mask = list(diff_dict.values())[0]
+                    if isinstance(first_mask, dict):
+                        first_mask = first_mask.get("mask")
+
+                    h, w = first_mask.shape
+                    combined_mask = np.zeros((h, w), dtype=np.float32)
+
+                    # 遍历所有对象，将它们的mask叠加
+                    for obj_id, mask_data in diff_dict.items():
+                        if isinstance(mask_data, dict):
+                            mask = mask_data.get("mask")
+                        else:
+                            mask = mask_data
+
+                        if mask is not None:
+                            # 使用逻辑或操作合并mask
+                            combined_mask = np.maximum(
+                                combined_mask, (mask > 0).astype(np.float32)
+                            )
+
+                    # 转换为tensor
+                    diff = torch.from_numpy(combined_mask)
+                else:
+                    diff = torch.zeros(
+                        (ori_img_width, ori_img_height), dtype=torch.float32
+                    )
+
+                # plt.figure(figsize=(10, 10))  # set the figure size
+                # plt.subplot(1, 1, 1)
+                # plt.imshow(diff)
+                # plt.title("T1")
+                # plt.axis("off")
+
+                # # show the plot
+                # plt.tight_layout()
+                # plt.show()
+
+                diff_classes_masks.append(diff)
+
+                _ = self.predictor.handle_request(
+                    request=dict(
+                        type="close_session",
+                        session_id=session_id,
+                    )
+                )
+            # diff_classes_masks中mask相加
+            combined_mask = torch.zeros(
+                (ori_img_width, ori_img_height), dtype=torch.float32
             )
-            # out = response["outputs"]
-
-            ##### module n #####
-            before_masks, after_masks = {}, {}
-
-            outputs_per_frame = self.propagate_in_video(session_id, "both")
-            frame_len = len(outputs_per_frame)
-
-            before_frame = outputs_per_frame[
-                0 if self.diff_frame_num == 1 else frame_len - 2
-            ]
-            after_frame = outputs_per_frame[frame_len - 1]
-
-            b_ids, b_masks, b_probs, b_boxes = (
-                before_frame.get("out_obj_ids"),
-                before_frame.get("out_binary_masks"),
-                before_frame.get("out_probs"),
-                before_frame.get("out_boxes_xywh"),
-            )
-            a_ids, a_masks, a_probs, a_boxes = (
-                after_frame.get("out_obj_ids"),
-                after_frame.get("out_binary_masks"),
-                after_frame.get("out_probs"),
-                after_frame.get("out_boxes_xywh"),
-            )
-
-            for id, mask, prob, box in zip(b_ids, b_masks, b_probs, b_boxes):
-                before_masks[id] = dict(
-                    mask=mask,
-                    prob=prob,
-                    box=box,
-                )
-
-            for id, mask, prob, box in zip(a_ids, a_masks, a_probs, a_boxes):
-                after_masks[id] = dict(
-                    mask=mask,
-                    prob=prob,
-                    box=box,
-                )
-
-            if merge_mask_func_version == "v1":
-                diff_dict = merge_masks_v1(
-                    before_masks,
-                    after_masks,
-                    iou_threshold=self.iou_threshold,
-                )
-            else:
-                diff_dict = merge_masks(
-                    before_masks,
-                    after_masks,
-                    iou_threshold=self.iou_threshold,
-                )
-
-            if diff_dict:
-                # 获取第一个mask的形状作为参考
-                first_mask = list(diff_dict.values())[0]
-                if isinstance(first_mask, dict):
-                    first_mask = first_mask.get("mask")
-
-                h, w = first_mask.shape
-                combined_mask = np.zeros((h, w), dtype=np.float32)
-
-                # 遍历所有对象，将它们的mask叠加
-                for obj_id, mask_data in diff_dict.items():
-                    if isinstance(mask_data, dict):
-                        mask = mask_data.get("mask")
-                    else:
-                        mask = mask_data
-
-                    if mask is not None:
-                        # 使用逻辑或操作合并mask
-                        combined_mask = np.maximum(
-                            combined_mask, (mask > 0).astype(np.float32)
-                        )
-
-                # 转换为tensor
-                diff = torch.from_numpy(combined_mask)
-            else:
-                diff = torch.zeros((1024, 1024), dtype=torch.float32)
-
-            # plt.figure(figsize=(10, 10))  # set the figure size
-            # plt.subplot(1, 1, 1)
-            # plt.imshow(diff)
-            # plt.title("T1")
-            # plt.axis("off")
-
-            # # show the plot
-            # plt.tight_layout()
-            # plt.show()
-
-            diff_mask_list.append(diff)
-
-            _ = self.predictor.handle_request(
-                request=dict(
-                    type="close_session",
-                    session_id=session_id,
-                )
-            )
+            for mask in diff_classes_masks:
+                combined_mask += mask.float()
+            diff_mask_list.append(combined_mask)
 
         if len(diff_mask_list) >= 2:
             mask1 = diff_mask_list[0]
@@ -1599,16 +1604,11 @@ class Baseline_Bi_SSCCE:
 
 class Baseline_Bi_SSCCE_CSPCF:
     def __init__(
-        self,
-        predictor=None,
-        mid_frame=0,
-        diff_frame_num=1,
-        iou_threshold=0.5,
+        self, predictor=None, iou_threshold=0.5, mixed_methods: str | None = None
     ):
         self.predictor = predictor
         self.iou_threshold = iou_threshold
-        self.mid_frame = mid_frame
-        self.diff_frame_num = diff_frame_num
+        self.mixed_methods = mixed_methods
 
     def renew_session(self, video_path):
         response = self.predictor.handle_request(
@@ -1654,10 +1654,10 @@ class Baseline_Bi_SSCCE_CSPCF:
         ##### module 1 #####
         for sort in ["asc", "desc"]:
             ##### module 2 #####
-            video_path = gen_frame(
+            video_path = gen_frame_v2(
                 img_paths,
                 sort=sort,
-                mid_frame=self.mid_frame,
+                mixed_methods=self.mixed_methods,
             )
 
             if isinstance(video_path, str) and video_path.endswith(".mp4"):
@@ -1711,9 +1711,7 @@ class Baseline_Bi_SSCCE_CSPCF:
             outputs_per_frame = self.propagate_in_video(session_id, "both")
             frame_len = len(outputs_per_frame)
 
-            before_frame = outputs_per_frame[
-                0 if self.diff_frame_num == 1 else frame_len - 2
-            ]
+            before_frame = outputs_per_frame[0]
             after_frame = outputs_per_frame[frame_len - 1]
 
             b_ids, b_masks, b_probs, b_boxes = (

@@ -5,7 +5,7 @@ import numpy as np
 from PIL import Image
 
 
-def enhanced_color_interpolation(img1, img2, alpha, method="histogram_matching"):
+def enhanced_color_interpolation(img1, img2, alpha=0, method="histogram_matching"):
     """
     Enhanced color interpolation between two images using various methods to avoid ghosting artifacts
 
@@ -172,7 +172,7 @@ def align_images_with_optical_flow(img1, img2):
     return aligned_img2
 
 
-def gen_frame(folder_paths, output_dir="_tmp_jpg", sort="asc", mid_frame=0):
+def gen_frame_v1(folder_paths, output_dir="_tmp_jpg", sort="asc", mid_frame=0):
     """
     Convert PNG format image files to JPEG format and optionally generate intermediate interpolated frames
 
@@ -314,5 +314,131 @@ def gen_frame(folder_paths, output_dir="_tmp_jpg", sort="asc", mid_frame=0):
                 )
         except Exception as e:
             print(f"Intermediate frame generation failed {alpha}: {str(e)}")
+
+    return output_dir
+
+
+def gen_frame_v2(
+    folder_paths, output_dir="_tmp_jpg", sort="asc", mixed_methods: str | None = None
+):
+
+    # Determine traversal order based on sorting method
+    paths_to_process = folder_paths if sort == "asc" else list(reversed(folder_paths))
+
+    # Clear folder contents
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+
+    # Ensure output folder exists (only need to check once)
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Process all input image files
+    for idx, folder_path in enumerate(paths_to_process):
+        if mixed_methods is not None and idx > 0:
+            continue
+        # Construct input and output paths
+        input_path = folder_path
+        output_filename = f"{idx + 1}.jpg"
+        output_path = os.path.join(output_dir, output_filename)
+
+        # Open PNG image and convert to RGB mode (JPEG does not support PNG's RGBA transparency)
+        filename = os.path.basename(folder_path)
+        try:
+            with Image.open(input_path) as img:
+                if img.mode in ("RGBA", "LA"):
+                    # Create an RGB image with white background
+                    background = Image.new("RGB", img.size, (255, 255, 255))
+                    background.paste(
+                        img, mask=img.split()[-1]
+                    )  # Use alpha channel as mask
+                    img = background
+                elif img.mode != "RGB":
+                    img = img.convert("RGB")
+
+                # Save as JPEG
+                img.save(output_path, "JPEG", quality=100)
+                print(
+                    f"Conversion successful: {filename} -> {os.path.basename(output_path)}"
+                )
+        except Exception as e:
+            print(f"Conversion failed {filename}: {str(e)}")
+
+    if mixed_methods is not None:
+        # Construct input and output paths
+        input_path = paths_to_process[0]
+        output_filename = f"{len(paths_to_process)}.jpg"
+        output_path = os.path.join(output_dir, output_filename)
+
+        # Open PNG image and convert to RGB mode (JPEG does not support PNG's RGBA transparency)
+        try:
+            with Image.open(input_path) as img:
+                if img.mode in ("RGBA", "LA"):
+                    # Create an RGB image with white background
+                    background = Image.new("RGB", img.size, (255, 255, 255))
+                    background.paste(
+                        img, mask=img.split()[-1]
+                    )  # Use alpha channel as mask
+                    img = background
+                elif img.mode != "RGB":
+                    img = img.convert("RGB")
+
+                # Perform linear color interpolation to generate intermediate frames
+                first_frame = paths_to_process[0]
+                final_frame = paths_to_process[-1]
+                img = enhanced_color_interpolation(
+                    # cv2.imread(first_frame, cv2.IMREAD_UNCHANGED),
+                    # cv2.imread(final_frame, cv2.IMREAD_UNCHANGED),
+                    Image.open(first_frame),
+                    Image.open(final_frame),
+                    method=mixed_methods,
+                )
+
+                # import matplotlib.pyplot as plt
+
+                # # create a figure that can hold three subplots
+                # plt.figure(figsize=(15, 10))  # set the figure size
+
+                # # drawing img_A
+                # # img_A = cv2.imread(img_paths[0])
+                # img_A = Image.open(first_frame)
+                # plt.subplot(2, 2, 1)
+                # plt.imshow(img_A)
+                # plt.title("T1")
+                # plt.axis("off")
+
+                # # drawing img_B
+                # # img_B = cv2.imread(img_paths[1])
+                # img_B = Image.open(final_frame)
+                # plt.subplot(2, 2, 2)
+                # plt.imshow(img_B)
+                # plt.title("T2")
+                # plt.axis("off")
+
+                # # drawing mask
+                # plt.subplot(2, 2, 3)
+                # plt.imshow(img, cmap="gray")
+                # plt.title("mask")
+                # plt.axis("off")
+
+                # # drawing label
+                # plt.subplot(2, 2, 4)
+                # plt.imshow(img, cmap="gray")
+                # plt.title("label")
+                # plt.axis("off")
+
+                # # show the plot
+                # plt.tight_layout()
+                # plt.show()
+
+                # Save as JPEG
+                # Convert RGB to BGR for OpenCV
+                img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(output_path, img_bgr)
+                # img.save(output_path, "JPEG", quality=100)
+                print(
+                    f"Intermediate frame generated: {mixed_methods} -> {os.path.basename(output_path)}"
+                )
+        except Exception as e:
+            print(f"Intermediate frame generation failed {mixed_methods}: {str(e)}")
 
     return output_dir
