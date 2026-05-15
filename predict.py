@@ -12,6 +12,7 @@ gpus_to_use = range(torch.cuda.device_count())
 # gpus_to_use = [torch.cuda.current_device()]
 
 from sam3.model_builder import build_sam3_video_predictor
+from sam3 import build_sam3_image_model
 
 
 import os
@@ -25,8 +26,16 @@ from sam3.visualization_utils import (
     prepare_masks_for_visualization,
     visualize_formatted_frame_output,
 )
+from sam3.model.sam3_image_processor import Sam3Processor
 
-from BiSAM2 import step_one
+# from BiSAM2 import step_one
+from BiSAM import (
+    Baseline,
+    BiSAM2,
+    Baseline_Bi,
+    Baseline_Bi_SSCCE,
+    Baseline_Bi_SSCCE_CSPCF,
+)
 
 
 def compute_mask_iou_batch(masks1, masks2):
@@ -273,84 +282,198 @@ def predict(
     max_objects_per_batch=50,
     score_threshold_detection: float = 0.5,
     new_det_thresh: float = 0.7,
+    model_type="baseline",
     **kwargs,
 ):
 
-    predictor = build_sam3_video_predictor(
-        gpus_to_use=gpus_to_use,
-        checkpoint_path="/home/qy/weights/sam3-model/sam3.pt",
-        score_threshold_detection=score_threshold_detection,
-        new_det_thresh=new_det_thresh,
-        # apply_temporal_disambiguation=False,
-    )
-
-    diff_mask_list = step_one(
-        img_paths,
-        predictor,
-        mid_frame=mid_frame,
-        diff_frame_num=diff_frame_num,
-        iou_threshold=iou_threshold,
-        prompt_text_str=prompt_text_str,
-        max_objects_per_batch=max_objects_per_batch,
-    )
-
-    # create a figure that can hold three subplots
-    plt.figure(figsize=(15, 10))  # set the figure size
-
-    b_mask_list = {}
-    for id, item in diff_mask_list[0].items():
-        b_mask_list[id] = item.get("mask")
-    mask_before = sum_masks_dict(b_mask_list, iou_threshold=iou_threshold)
-    h, w = mask_before.shape[-2:]
-    mask = mask_before.reshape(h, w, 1)
-    # drawing img_A
-    plt.subplot(1, 1, 1)
-    plt.imshow(mask)
-    plt.title("T1")
-    plt.axis("off")
-
-    # show the plot
-    plt.tight_layout()
-    plt.show()
-
-    a_mask_list = {}
-    for id, item in diff_mask_list[1].items():
-        a_mask_list[id] = item.get("mask")
-    mask_before = sum_masks_dict(a_mask_list, iou_threshold=iou_threshold)
-    h, w = mask_before.shape[-2:]
-    mask = mask_before.reshape(h, w, 1)
-    # drawing img_A
-    plt.subplot(1, 1, 1)
-    plt.imshow(mask)
-    plt.title("T1")
-    plt.axis("off")
-
-    # show the plot
-    plt.tight_layout()
-    plt.show()
-
-    import time
-
-    print("计时开始: ", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-
-    if DEVICE == torch.device("cuda"):
-        diff_mask = merge_overlapping_masks_gpu(
-            *diff_mask_list, iou_threshold=iou_threshold
+    if model_type == "baseline":
+        bpe_path = f"{sam3_root}/sam3/assets/bpe_simple_vocab_16e6.txt.gz"
+        model = build_sam3_image_model(
+            bpe_path=bpe_path, checkpoint_path="/home/qy/weights/sam3-model/sam3.pt"
         )
-    else:
-        diff_mask = merge_overlapping_masks_multiprocess(
-            *diff_mask_list, iou_threshold=iou_threshold
+        baseline = Baseline(
+            model,
+            confidence_threshold=score_threshold_detection,
+        )
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            mask = baseline.step_one(img_paths, prompt_text_str)
+
+        if "baseline" in locals():
+            del baseline
+        torch.cuda.empty_cache()
+        gc.collect()
+    elif model_type == "baseline_bi":
+        predictor = build_sam3_video_predictor(
+            gpus_to_use=gpus_to_use,
+            checkpoint_path="/home/qy/weights/sam3-model/sam3.pt",
+            score_threshold_detection=score_threshold_detection,
+            new_det_thresh=new_det_thresh,
+            # apply_temporal_disambiguation=False,
+            use_decoupled_selection=kwargs.get("use_decoupled_selection", False),
         )
 
-    print("计时结束: ", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+        baseline_bi = Baseline_Bi(predictor)
 
-    h, w = diff_mask.shape[-2:]
-    mask = diff_mask.reshape(h, w, 1)
+        mask = baseline_bi.step_one(
+            img_paths,
+            prompt_text_str=prompt_text_str,
+        )
 
-    if "predictor" in locals():
-        del predictor
-    torch.cuda.empty_cache()
-    gc.collect()
+        if "baseline_bi" in locals():
+            del baseline_bi
+        torch.cuda.empty_cache()
+        gc.collect()
+    elif "baseline_bi_ssccev" in model_type:
+        predictor = build_sam3_video_predictor(
+            gpus_to_use=gpus_to_use,
+            checkpoint_path="/home/qy/weights/sam3-model/sam3.pt",
+            score_threshold_detection=score_threshold_detection,
+            new_det_thresh=new_det_thresh,
+            # apply_temporal_disambiguation=False,
+            use_decoupled_selection=kwargs.get("use_decoupled_selection", False),
+        )
+
+        baseline_bi_sscce = Baseline_Bi_SSCCE(
+            predictor,
+            iou_threshold=iou_threshold,
+            mixed_methods="color_transfer",
+        )
+
+        mask = baseline_bi_sscce.step_one(
+            img_paths,
+            prompt_text=prompt_text_str,
+            merge_mask_func_version=(
+                "v1" if model_type == "baseline_bi_ssccev1" else "v2"
+            ),
+        )
+
+        if "baseline_bi_sscce" in locals():
+            del baseline_bi_sscce
+        torch.cuda.empty_cache()
+        gc.collect()
+    elif model_type == "baseline_bi_sscce_cspcf":
+        predictor = build_sam3_video_predictor(
+            gpus_to_use=gpus_to_use,
+            checkpoint_path="/home/qy/weights/sam3-model/sam3.pt",
+            score_threshold_detection=score_threshold_detection,
+            new_det_thresh=new_det_thresh,
+            # apply_temporal_disambiguation=False,
+            use_decoupled_selection=kwargs.get("use_decoupled_selection", False),
+        )
+
+        baseline_bi_sscce_cspcf = Baseline_Bi_SSCCE_CSPCF(
+            predictor, iou_threshold=iou_threshold
+        )
+
+        diff_mask_list = baseline_bi_sscce_cspcf.step_one(
+            img_paths,
+            prompt_text_str=prompt_text_str,
+        )
+
+        predictor.shutdown()
+
+        if DEVICE == torch.device("cuda"):
+            diff_mask = merge_overlapping_masks_gpu(
+                *diff_mask_list, iou_threshold=iou_threshold
+            )
+        else:
+            diff_mask = merge_overlapping_masks_multiprocess(
+                *diff_mask_list, iou_threshold=iou_threshold
+            )
+
+        h, w = diff_mask.shape[-2:]
+        mask = diff_mask.reshape(h, w, 1)
+
+        if "baseline_bi_sscce_cspcf" in locals():
+            del baseline_bi_sscce_cspcf
+        torch.cuda.empty_cache()
+        gc.collect()
+    elif model_type == "bisam2":
+        predictor = build_sam3_video_predictor(
+            gpus_to_use=gpus_to_use,
+            checkpoint_path="/home/qy/weights/sam3-model/sam3.pt",
+            score_threshold_detection=score_threshold_detection,
+            new_det_thresh=new_det_thresh,
+            # apply_temporal_disambiguation=False,
+            use_decoupled_selection=kwargs.get("use_decoupled_selection", False),
+        )
+
+        bisam2 = BiSAM2(
+            predictor=predictor,
+            mid_frame=mid_frame,
+            diff_frame_num=diff_frame_num,
+            iou_threshold=iou_threshold,
+        )
+
+        diff_mask_list = bisam2.step_one(
+            img_paths,
+            # predictor,
+            # mid_frame=mid_frame,
+            # diff_frame_num=diff_frame_num,
+            # iou_threshold=iou_threshold,
+            prompt_text_str=prompt_text_str,
+            # max_objects_per_batch=max_objects_per_batch,
+        )
+
+        predictor.shutdown()
+
+        # create a figure that can hold three subplots
+        plt.figure(figsize=(15, 10))  # set the figure size
+
+        b_mask_list = {}
+        for id, item in diff_mask_list[0].items():
+            b_mask_list[id] = item.get("mask")
+        mask_before = sum_masks_dict(b_mask_list, iou_threshold=iou_threshold)
+        h, w = mask_before.shape[-2:]
+        mask = mask_before.reshape(h, w, 1)
+        # drawing img_A
+        plt.subplot(1, 1, 1)
+        plt.imshow(mask)
+        plt.title("T1")
+        plt.axis("off")
+
+        # show the plot
+        plt.tight_layout()
+        plt.show()
+
+        a_mask_list = {}
+        for id, item in diff_mask_list[1].items():
+            a_mask_list[id] = item.get("mask")
+        mask_before = sum_masks_dict(a_mask_list, iou_threshold=iou_threshold)
+        h, w = mask_before.shape[-2:]
+        mask = mask_before.reshape(h, w, 1)
+        # drawing img_A
+        plt.subplot(1, 1, 1)
+        plt.imshow(mask)
+        plt.title("T1")
+        plt.axis("off")
+
+        # show the plot
+        plt.tight_layout()
+        plt.show()
+
+        import time
+
+        print("计时开始: ", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+
+        if DEVICE == torch.device("cuda"):
+            diff_mask = merge_overlapping_masks_gpu(
+                *diff_mask_list, iou_threshold=iou_threshold
+            )
+        else:
+            diff_mask = merge_overlapping_masks_multiprocess(
+                *diff_mask_list, iou_threshold=iou_threshold
+            )
+
+        print("计时结束: ", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+
+        h, w = diff_mask.shape[-2:]
+        mask = diff_mask.reshape(h, w, 1)
+
+        if "predictor" in locals():
+            del predictor
+        torch.cuda.empty_cache()
+        gc.collect()
 
     return mask
 
@@ -372,6 +495,8 @@ def inference(
     max_objects_per_batch=50,
     score_threshold_detection: float = 0.5,
     new_det_thresh: float = 0.7,
+    model_type="baseline",
+    **kwargs,
 ):
     if dataset_name is None:
         print("请输入数据集名称")
@@ -380,6 +505,10 @@ def inference(
     if dataset_name in ["WHU-CD", "LEVIR-CD"]:
         before_img_dir = f"/home/qy/CD_datasets/{dataset_name}/test/A"
         after_img_dir = f"/home/qy/CD_datasets/{dataset_name}/test/B"
+        label_img_dir = f"/home/qy/CD_datasets/{dataset_name}/test/label"
+    elif dataset_name == "SECOND":
+        before_img_dir = f"/home/qy/CD_datasets/{dataset_name}/test/im1"
+        after_img_dir = f"/home/qy/CD_datasets/{dataset_name}/test/im2"
         label_img_dir = f"/home/qy/CD_datasets/{dataset_name}/test/label"
     else:
         print("数据集不支持")
@@ -395,10 +524,95 @@ def inference(
         p for p in os.listdir(before_img_dir) if os.path.splitext(p)[-1] in [".png"]
     ]
 
-    if mid_frame == 0:
-        output_dir = f"./logs/{dataset_name}/generate_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic"
-    else:
-        output_dir = f"./logs/{dataset_name}/generate_mid{mid_frame}_{diff_frame_num}_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic"
+    if model_type == "baseline":
+        bpe_path = f"{sam3_root}/sam3/assets/bpe_simple_vocab_16e6.txt.gz"
+        model = build_sam3_image_model(
+            bpe_path=bpe_path, checkpoint_path="/home/qy/weights/sam3-model/sam3.pt"
+        )
+        baseline = Baseline(
+            model,
+            confidence_threshold=score_threshold_detection,
+        )
+
+        output_dir = f"./logs/{dataset_name}/{model_type}/generate_iou{iou_threshold}_thresh({score_threshold_detection})_[{prompt_text_str}]/automatic"
+    elif model_type == "baseline_bi":
+        predictor = build_sam3_video_predictor(
+            gpus_to_use=gpus_to_use,
+            checkpoint_path="/home/qy/weights/sam3-model/sam3.pt",
+            score_threshold_detection=score_threshold_detection,
+            new_det_thresh=new_det_thresh,
+            # apply_temporal_disambiguation=False,
+            use_decoupled_selection=kwargs.get("use_decoupled_selection", False),
+        )
+
+        baseline_bi = Baseline_Bi(predictor)
+        if kwargs.get("use_decoupled_selection", False):
+            output_dir = f"./logs/{dataset_name}/{model_type}/generate_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic_use_decoupled_selection"
+        else:
+            output_dir = f"./logs/{dataset_name}/{model_type}/generate_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic"
+    elif "baseline_bi_ssccev" in model_type:
+        predictor = build_sam3_video_predictor(
+            gpus_to_use=gpus_to_use,
+            checkpoint_path="/home/qy/weights/sam3-model/sam3.pt",
+            score_threshold_detection=score_threshold_detection,
+            new_det_thresh=new_det_thresh,
+            # apply_temporal_disambiguation=False,
+            use_decoupled_selection=kwargs.get("use_decoupled_selection", False),
+        )
+
+        baseline_bi_sscce = Baseline_Bi_SSCCE(
+            predictor,
+            iou_threshold=iou_threshold,
+            mid_frame=mid_frame,
+            diff_frame_num=diff_frame_num,
+        )
+
+        if mid_frame == 0:
+            if kwargs.get("use_decoupled_selection", False):
+                output_dir = f"./logs/{dataset_name}/{model_type}/generate_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic_use_decoupled_selection"
+            else:
+                output_dir = f"./logs/{dataset_name}/{model_type}/generate_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic"
+        else:
+            output_dir = f"./logs/{dataset_name}/{model_type}/generate_mid{mid_frame}_{diff_frame_num}_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic"
+
+    elif model_type == "baseline_bi_sscce_cspcf":
+        predictor = build_sam3_video_predictor(
+            gpus_to_use=gpus_to_use,
+            checkpoint_path="/home/qy/weights/sam3-model/sam3.pt",
+            score_threshold_detection=score_threshold_detection,
+            new_det_thresh=new_det_thresh,
+            # apply_temporal_disambiguation=False,
+            use_decoupled_selection=kwargs.get("use_decoupled_selection", False),
+        )
+
+        baseline_bi_sscce_cspcf = Baseline_Bi_SSCCE_CSPCF(
+            predictor, iou_threshold=iou_threshold
+        )
+
+        if kwargs.get("use_decoupled_selection", False):
+            output_dir = f"./logs/{dataset_name}/{model_type}/generate_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic_use_decoupled_selection"
+        else:
+            output_dir = f"./logs/{dataset_name}/{model_type}/generate_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic"
+
+    elif model_type == "bisam2":
+        predictor = build_sam3_video_predictor(
+            gpus_to_use=gpus_to_use,
+            checkpoint_path="/home/qy/weights/sam3-model/sam3.pt",
+            score_threshold_detection=score_threshold_detection,
+            new_det_thresh=new_det_thresh,
+            use_decoupled_selection=kwargs.get("use_decoupled_selection", False),
+        )
+        bisam2 = BiSAM2(
+            predictor=predictor,
+            mid_frame=mid_frame,
+            diff_frame_num=diff_frame_num,
+            iou_threshold=iou_threshold,
+        )
+
+        if mid_frame == 0:
+            output_dir = f"./logs/{dataset_name}/{model_type}/generate_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic"
+        else:
+            output_dir = f"./logs/{dataset_name}/{model_type}/generate_mid{mid_frame}_{diff_frame_num}_iou{iou_threshold}_thresh({score_threshold_detection},{new_det_thresh})_[{prompt_text_str}]/automatic"
 
     # 存在的文件夹则读取已完成文件
     if os.path.isdir(output_dir):
@@ -416,13 +630,6 @@ def inference(
         Pre_meter = AverageMeter()
         Rec_meter = AverageMeter()
 
-        predictor = build_sam3_video_predictor(
-            gpus_to_use=gpus_to_use,
-            checkpoint_path="/home/qy/weights/sam3-model/sam3.pt",
-            score_threshold_detection=score_threshold_detection,
-            new_det_thresh=new_det_thresh,
-        )
-
         for idx, img_name in enumerate(img_names):
             # 跳过已存在的文件
             if img_name in exist_files:
@@ -436,24 +643,53 @@ def inference(
                 os.path.join(after_img_dir, img_name),
             ]
 
-            diff_mask_list = step_one(
-                img_paths,
-                predictor,
-                mid_frame=mid_frame,
-                diff_frame_num=diff_frame_num,
-                iou_threshold=iou_threshold,
-                prompt_text_str=prompt_text_str,
-                max_objects_per_batch=max_objects_per_batch,
-            )
+            if model_type == "baseline":
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    pred = baseline.step_one(img_paths, prompt_text_str)
+            elif model_type == "baseline_bi":
+                pred = baseline_bi.step_one(
+                    img_paths,
+                    prompt_text_str=prompt_text_str,
+                )
+            elif "baseline_bi_ssccev" in model_type:
+                pred = baseline_bi_sscce.step_one(
+                    img_paths,
+                    prompt_text=prompt_text_str,
+                    merge_mask_func_version=(
+                        "v1" if model_type == "baseline_bi_ssccev1" else "v2"
+                    ),
+                )
+                # pred转为numpy数组
+                pred = pred.cpu().numpy().astype(np.uint8)
 
-            if DEVICE == torch.device("cuda"):
-                diff_mask = merge_overlapping_masks_gpu(
-                    *diff_mask_list, iou_threshold=iou_threshold
+            elif model_type == "baseline_bi_sscce_cspcf":
+                diff_mask_list = baseline_bi_sscce_cspcf.step_one(
+                    img_paths,
+                    prompt_text_str=prompt_text_str,
                 )
-            else:
-                diff_mask = merge_overlapping_masks_multiprocess(
-                    *diff_mask_list, iou_threshold=iou_threshold
+
+                if DEVICE == torch.device("cuda"):
+                    pred = merge_overlapping_masks_gpu(
+                        *diff_mask_list, iou_threshold=iou_threshold
+                    )
+                else:
+                    pred = merge_overlapping_masks_multiprocess(
+                        *diff_mask_list, iou_threshold=iou_threshold
+                    )
+            elif model_type == "bisam2":
+                diff_mask_list = bisam2.step_one(
+                    img_paths,
+                    prompt_text_str=prompt_text_str,
                 )
+
+                if DEVICE == torch.device("cuda"):
+                    pred = merge_overlapping_masks_gpu(
+                        *diff_mask_list, iou_threshold=iou_threshold
+                    )
+                else:
+                    pred = merge_overlapping_masks_multiprocess(
+                        *diff_mask_list, iou_threshold=iou_threshold
+                    )
 
             # 读取标签图（单通道）
             label_path = os.path.join(label_img_dir, img_name)
@@ -472,14 +708,14 @@ def inference(
             else:
                 label_mask = label_mask_np
 
-            # iou = compute_mask_iou(diff_mask, label_mask)
+            # iou = compute_mask_iou(pred, label_mask)
 
-            acc, precision, recall, f1, iou = binary_accuracy(diff_mask, label_mask)
+            acc, precision, recall, f1, iou = binary_accuracy(pred, label_mask)
             # acc, precision, recall, f1, iou = binary_accuracy_sklearn(
-            #     diff_mask, label_mask
+            #     pred, label_mask
             # )
             # acc, precision, recall, f1, iou = binary_accuracy_torchmetrics(
-            #     diff_mask, label_mask
+            #     pred, label_mask
             # )
 
             F1_meter.update(f1)
@@ -496,8 +732,8 @@ def inference(
             )
 
             # 保存mask
-            h, w = diff_mask.shape[-2:]
-            mask_image = diff_mask.reshape(h, w, 1)
+            h, w = pred.shape[-2:]
+            mask_image = pred.reshape(h, w, 1)
             cv2.imwrite(os.path.join(output_dir, img_name), mask_image * 255)
 
             # if "predictor" in locals():
@@ -509,84 +745,135 @@ def inference(
             print(
                 f"平均值 iou: {IoU_meter.avg} f1: {F1_meter.avg} pre: {Pre_meter.avg} rec: {Rec_meter.avg} acc:{Acc_meter.avg}"
             )
-            f.write(
-                f"平均值 iou: {IoU_meter.avg} f1: {F1_meter.avg} pre: {Pre_meter.avg} rec: {Rec_meter.avg} acc:{Acc_meter.avg}"
-            )
+            if (
+                IoU_meter.avg is not None
+                and F1_meter.avg is not None
+                and Pre_meter.avg is not None
+                and Rec_meter.avg is not None
+                and Acc_meter.avg is not None
+            ):
+                f.write(
+                    f"平均值 iou: {IoU_meter.avg} f1: {F1_meter.avg} pre: {Pre_meter.avg} rec: {Rec_meter.avg} acc:{Acc_meter.avg}"
+                )
         except statistics.StatisticsError:
             print("列表为空，无法计算平均值")
 
 
 if __name__ == "__main__":
-    # img_name = "tile_9216_11264.png"
+    img_name = "tile_10240_7168.png"
+    img_dirs = [
+        "/home/qy/CD_datasets/WHU-CD/test/A",
+        "/home/qy/CD_datasets/WHU-CD/test/B",
+        "/home/qy/CD_datasets/WHU-CD/test/label",
+    ]
+    # img_name = "test_46.png"
     # img_dirs = [
-    #     "/home/qy/CD_datasets/WHU-CD/test/A",
-    #     "/home/qy/CD_datasets/WHU-CD/test/B",
-    #     "/home/qy/CD_datasets/WHU-CD/test/label",
+    #     "/home/qy/CD_datasets/LEVIR-CD/test/A",
+    #     "/home/qy/CD_datasets/LEVIR-CD/test/B",
+    #     "/home/qy/CD_datasets/LEVIR-CD/test/label",
     # ]
-    # # img_name = "test_118.png"
-    # # img_dirs = [
-    # #     "/home/qy/CD_datasets/LEVIR-CD/test/A",
-    # #     "/home/qy/CD_datasets/LEVIR-CD/test/B",
-    # #     "/home/qy/CD_datasets/LEVIR-CD/test/label",
-    # # ]
-    # img_paths = []
-    # for img_dir in img_dirs:
-    #     img_paths.append(os.path.join(img_dir, img_name))
+    # img_name = "00007.png"
+    # img_dirs = [
+    #     "/home/qy/CD_datasets/SECOND/test/im1",
+    #     "/home/qy/CD_datasets/SECOND/test/im2",
+    #     "/home/qy/CD_datasets/SECOND/test/label",
+    # ]
+    img_paths = []
+    for img_dir in img_dirs:
+        img_paths.append(os.path.join(img_dir, img_name))
 
-    # mask = predict(
-    #     img_paths=img_paths[:2],
-    #     prompt_text_str=["building or roof or house"],
-    #     mid_frame=0,
-    #     diff_frame_num=-1,
-    #     max_objects_per_batch=500,
-    #     score_threshold_detection=0.3,
-    #     new_det_thresh=0.3,
-    # )
-    # # create a figure that can hold three subplots
-    # plt.figure(figsize=(15, 10))  # set the figure size
-
-    # # drawing img_A
-    # # img_A = cv2.imread(img_paths[0])
-    # img_A = Image.open(img_paths[0])
-    # plt.subplot(2, 2, 1)
-    # plt.imshow(img_A)
-    # plt.title("T1")
-    # plt.axis("off")
-
-    # # drawing img_B
-    # # img_B = cv2.imread(img_paths[1])
-    # img_B = Image.open(img_paths[1])
-    # plt.subplot(2, 2, 2)
-    # plt.imshow(img_B)
-    # plt.title("T2")
-    # plt.axis("off")
-
-    # # drawing mask
-    # plt.subplot(2, 2, 3)
-    # plt.imshow(mask, cmap="gray")
-    # plt.title("mask")
-    # plt.axis("off")
-
-    # # drawing label
-    # plt.subplot(2, 2, 4)
-    # plt.imshow(Image.open(img_paths[2]), cmap="gray")
-    # plt.title("label")
-    # plt.axis("off")
-
-    # # show the plot
-    # plt.tight_layout()
-    # plt.show()
-
-    ### 批量推理 ###
-    inference(
-        dataset_name="WHU-CD",
-        prompt_text_str=["building or roof or house"],
-        mid_frame=0,
+    mask = predict(
+        img_paths=img_paths[:2],
+        prompt_text_str=["roof"],
+        # prompt_text_str=[
+        #     "non-vegetated ground",
+        #     "surface",
+        #     "tree",
+        #     "low vegetation",
+        #     "water",
+        #     "buildings",
+        #     "playgrounds",
+        # ],
+        mid_frame=1,
         diff_frame_num=-1,
         max_objects_per_batch=500,
-        score_threshold_detection=0.5,
-        new_det_thresh=0.5,
+        score_threshold_detection=0.35,
+        new_det_thresh=0.4,
+        model_type="baseline_bi_ssccev2",
+        use_decoupled_selection=False,
     )
+    # create a figure that can hold three subplots
+    plt.figure(figsize=(15, 10))  # set the figure size
+
+    # drawing img_A
+    # img_A = cv2.imread(img_paths[0])
+    img_A = Image.open(img_paths[0])
+    plt.subplot(2, 2, 1)
+    plt.imshow(img_A)
+    plt.title("T1")
+    plt.axis("off")
+
+    # drawing img_B
+    # img_B = cv2.imread(img_paths[1])
+    img_B = Image.open(img_paths[1])
+    plt.subplot(2, 2, 2)
+    plt.imshow(img_B)
+    plt.title("T2")
+    plt.axis("off")
+
+    # drawing mask
+    plt.subplot(2, 2, 3)
+    plt.imshow(mask, cmap="gray")
+    plt.title("mask")
+    plt.axis("off")
+
+    # drawing label
+    plt.subplot(2, 2, 4)
+    plt.imshow(Image.open(img_paths[2]), cmap="gray")
+    plt.title("label")
+    plt.axis("off")
+
+    # show the plot
+    plt.tight_layout()
+    plt.show()
+
+    ### 批量推理 ###
+    # iou_thresholds = [0.5]
+    # dataset_names = ["WHU-CD"]
+    # score_threshold_detections = [0.3, 0.35, 0.4, 0.45, 0.5]
+    # new_det_threshs = [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7]
+    # for dataset_name in dataset_names:
+    #     for iou_threshold in iou_thresholds:
+    #         for score_threshold_detection in score_threshold_detections:
+    #             for new_det_thresh in new_det_threshs:
+    #                 if (
+    #                     new_det_thresh < score_threshold_detection
+    #                     or new_det_thresh - score_threshold_detection > 0.2
+    #                 ):
+    #                     continue
+    #                 inference(
+    #                     dataset_name=dataset_name,
+    #                     prompt_text_str=["roof"],
+    #                     # prompt_text_str=[
+    #                     #     "non-vegetated ground",
+    #                     #     "surface",
+    #                     #     "tree",
+    #                     #     "low vegetation",
+    #                     #     "water",
+    #                     #     "building",
+    #                     #     "playground",
+    #                     # ],
+    #                     mid_frame=1,
+    #                     diff_frame_num=-1,
+    #                     max_objects_per_batch=500,
+    #                     # score_threshold_detection=0.25,
+    #                     # new_det_thresh=0.25,
+    #                     score_threshold_detection=score_threshold_detection,
+    #                     new_det_thresh=new_det_thresh,
+    #                     iou_threshold=iou_threshold,
+    #                     model_type="baseline_bi_ssccev2",
+    #                     use_decoupled_selection=False,
+    #                 )
 
     # ### 测试插值方法 ###
     # from BiSAM2 import color_transfer, match_histograms, align_images_with_optical_flow
